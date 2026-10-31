@@ -22,6 +22,6 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true
   },
-  "include": ["src", "server", "api", "vite.config.ts"]
+  "include": ["src", "server", "vite.config.ts"]
 }
 

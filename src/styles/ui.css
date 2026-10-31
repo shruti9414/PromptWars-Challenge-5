@@ -144,7 +144,7 @@
 .chip--check:has(input:focus-visible) { outline: 3px solid var(--blue-600); outline-offset: 2px; }
 
 /* ---------- Table ---------- */
-.table-wrap { overflow-x: auto; }
+.table-wrap { overflow-x: auto; position: relative; }
 .table { width: 100%; border-collapse: collapse; font-size: 0.93rem; }
 .table th, .table td { padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: middle; }
 .table thead th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-3); background: #fafbff; white-space: nowrap; }

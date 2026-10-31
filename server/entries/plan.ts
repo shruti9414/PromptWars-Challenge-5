@@ -1,5 +1,5 @@
-import { handleNode, readEnv } from '../server/node'
-import type { NodeReq, NodeRes } from '../server/node'
+import { handleNode, readEnv } from '../node'
+import type { NodeReq, NodeRes } from '../node'
 
 /** Vercel Function: POST /api/plan. The API key is read from the server environment only. */
 export default async function handler(req: NodeReq, res: NodeRes) {

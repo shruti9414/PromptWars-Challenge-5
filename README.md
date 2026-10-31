@@ -75,7 +75,7 @@ buildProposal(): app code recomputes
 Preview  ->  user confirms  ->  apply + snapshot (undo)
 ```
 
-- **Server-side only.** `api/plan.ts`, `api/assistant.ts` and `api/status.ts` are Vercel Functions; during `npm run dev` the same handlers are served by a Vite plugin (`server/vitePlugin.ts`). The API key is read from `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` in `server/` and never reaches the browser bundle. Each key is used only with its own provider (an `sk-ant-` key is Anthropic, other `sk-` keys in `OPENAI_API_KEY` are OpenAI), and a mismatched key is ignored. DeepSeek is called in JSON mode with a one-time retry; every answer is checked against the same schemas.
+- **Server-side only.** `api/plan.js`, `api/assistant.js` and `api/status.js` are Vercel Functions, pre-bundled from `server/entries/*.ts` by `npm run build:api` (Vercel's Node runtime cannot resolve the sources' extensionless imports; rerun it after changing `server/` or `src/ai/`); during `npm run dev` the same handlers are served by a Vite plugin (`server/vitePlugin.ts`). The API key is read from `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` in `server/` and never reaches the browser bundle. Each key is used only with its own provider (an `sk-ant-` key is Anthropic, other `sk-` keys in `OPENAI_API_KEY` are OpenAI), and a mismatched key is ignored. DeepSeek is called in JSON mode with a one-time retry; every answer is checked against the same schemas.
 - **Structured output.** The model must answer through a forced tool call whose input schema comes from the Zod schemas in `src/ai/schema.ts` (overview, recommendations, budget lines, timeline items, vendor requirements, risks, assumptions, follow-up questions). Output is validated on the server and again in the browser.
 - **Numbers are never trusted.** `src/ai/budget.ts` and `src/ai/timeline.ts` drop invalid estimates, cap absurd ones, round to whole units, add a contingency reserve sized to the budget style (strict 10%, moderate 7%, flexible 5%), compute totals and cost per guest, detect budget overruns and build a trimmed alternative that fits (optional lines first, then essentials down to a floor). Due dates come from the real event date plus a "days before event" offset; short runways are compressed proportionally, dependencies are validated (unknown, self and circular ones are removed, dependencies are never due after their dependents) and a last-minute task is added if missing. Percentage and guest-count changes from the assistant ("reduce by 15%", "50 more guests") are computed by the app.
 - **Nothing is overwritten silently.** Every result (full plan, section regeneration, assistant proposal) becomes a *proposal* with a preview and a confirmation dialog. Paid, billed, completed, booked or hand-edited items are always kept; stale previews are rejected. Each applied change stores a snapshot you can restore from "Plan history" (last 8 kept).
@@ -119,7 +119,7 @@ npm run preview              # serve the build at http://localhost:4173
 
 Without a key the app runs fully in labelled demo mode. See [MANUAL_TESTING.md](MANUAL_TESTING.md) for a browser checklist.
 
-Deploying to Vercel works with no configuration: `dist/` is served statically and `api/*.ts` become functions. Add one provider key in the project environment variables.
+Deploying to Vercel works with no configuration: `dist/` is served statically and `api/*.js` become functions. Add one provider key in the project environment variables.
 
 ## Testing
 
