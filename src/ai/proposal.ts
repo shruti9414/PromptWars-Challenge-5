@@ -82,109 +82,132 @@ export function resolveEventChanges(event: EventPlan, changes: EventChanges | un
   return { ...out, issues }
 }
 
+/** Collects what the application adjusted (`issues`) and which sections will change (`touches`) while a proposal is built. */
+interface Notes { issues: string[]; touches: string[] }
+type ResolvedChanges = ReturnType<typeof resolveEventChanges>
+
+function describeEventChanges(event: EventPlan, resolved: ResolvedChanges, notes: Notes): Proposal['eventChanges'] {
+  const eventChanges: Proposal['eventChanges'] = {}
+  if (resolved.guestCount !== undefined) {
+    eventChanges.guestCount = { from: event.guestCount, to: resolved.guestCount }
+    notes.touches.push('Guest count')
+  }
+  if (resolved.budget !== undefined) {
+    eventChanges.budget = { from: event.budget, to: resolved.budget }
+    notes.touches.push('Total budget')
+  }
+  return eventChanges
+}
+
+function overBudgetIssue(feasible: boolean, proposed: BudgetAnalysis, fitted: BudgetAnalysis | null): string {
+  return feasible
+    ? `The proposed budget is over by ${proposed.overBy.toLocaleString('en-US')}. A trimmed version that fits is available.`
+    : `Even with maximum sensible trimming the plan is over budget by ${(fitted?.overBy ?? proposed.overBy).toLocaleString('en-US')}. Raise the budget, reduce guests or choose cheaper options.`
+}
+
+/** Budget section from an AI patch: sanitised lines, merged with existing expenses, with a fitted alternative when over budget. */
+function budgetFromPatch(o: BuildOptions, budgetPatch: NonNullable<Patch['budget']>, budgetTotal: number, guests: number, notes: Notes): BudgetProposal {
+  const { event, flexibility } = o
+  const clean = sanitizeLines(budgetPatch.lines, budgetTotal)
+  notes.issues.push(...clean.issues)
+  const withReserve = ensureContingency(clean.lines, budgetTotal, flexibility)
+  const merged = mergeBudget(event.expenses, withReserve, budgetTotal)
+  notes.issues.push(...merged.issues)
+  const analysisProposed = analyzeBudget([...merged.kept, ...merged.proposed], budgetTotal, guests)
+  const analysisFitted = merged.fitted ? analyzeBudget([...merged.kept, ...merged.fitted], budgetTotal, guests) : null
+  if (analysisProposed.overBudget) notes.issues.push(overBudgetIssue(merged.feasible, analysisProposed, analysisFitted))
+  // Savings the model claims can never exceed what is actually being spent.
+  const savings = budgetPatch.savings.filter((s) => s.estimatedSaving <= analysisProposed.total).map((s) => ({ ...s, estimatedSaving: Math.round(s.estimatedSaving) }))
+  notes.touches.push('Budget')
+  return {
+    ...merged,
+    analysisProposed,
+    analysisFitted,
+    savings,
+    upgrades: budgetPatch.upgrades,
+    lines: withReserve.map((l) => ({ title: l.title, rationale: l.rationale, essential: l.essential })),
+    replaced: event.expenses.length - merged.kept.length,
+  }
+}
+
+/** Rebalances existing lines for a new headcount and/or budget with arithmetic only. */
+function budgetFromChanges(o: BuildOptions, resolved: ResolvedChanges, budgetTotal: number, guests: number, notes: Notes): BudgetProposal | undefined {
+  const { event } = o
+  let expenses = event.expenses
+  if (resolved.guestCount !== undefined) {
+    const scaled = scaleForGuests(expenses, event.guestCount, resolved.guestCount)
+    expenses = scaled.expenses
+    for (const s of scaled.skipped) notes.issues.push(`"${s.title}" is already billed or edited by you, so it was not rescaled. Confirm the new headcount with that vendor.`)
+  }
+  if (o.rebalanceBudget !== false) {
+    const re = rebalanceExpenses(expenses, budgetTotal)
+    expenses = re.expenses
+    if (!re.feasible) notes.issues.push('Your costs cannot be trimmed enough to fit the new budget. Review the highest lines manually.')
+  }
+  if (!expenses.some((e, i) => e !== event.expenses[i])) return undefined
+  const analysis = analyzeBudget(expenses, budgetTotal, guests)
+  if (analysis.overBudget) notes.issues.push(`After the change you would be over budget by ${analysis.overBy.toLocaleString('en-US')}.`)
+  notes.touches.push('Budget lines')
+  return {
+    kept: [], proposed: expenses, fitted: null, feasible: !analysis.overBudget, analysisProposed: analysis, analysisFitted: null,
+    savings: [], upgrades: [], lines: [], replaced: 0,
+  }
+}
+
+function timelineSection(o: BuildOptions, notes: Notes): Proposal['timeline'] {
+  const { event, patch, today } = o
+  if (!patch.timeline || patch.timeline.length === 0) return undefined
+  const norm = normalizeTimeline(patch.timeline, event.date, today)
+  notes.issues.push(...norm.issues)
+  if (norm.tasks.length === 0) return undefined
+  const merged = mergeTimeline(event.tasks, norm.tasks)
+  notes.issues.push(...merged.issues)
+  notes.touches.push('Timeline')
+  return { tasks: merged.tasks, kept: merged.kept, replaced: merged.replaced, compressed: norm.compressed }
+}
+
+function vendorSection(o: BuildOptions, notes: Notes): Proposal['vendors'] {
+  const { event, patch, today } = o
+  if (!patch.vendors || patch.vendors.length === 0) return undefined
+  const norm = normalizeVendors(patch.vendors, event.date, today)
+  notes.issues.push(...norm.issues)
+  const merged = mergeVendors(event.vendors, norm.vendors)
+  notes.issues.push(...merged.issues)
+  notes.touches.push('Vendor checklist')
+  return { vendors: merged.vendors, kept: merged.kept, replaced: merged.replaced }
+}
+
+function planSection(patch: Patch, notes: Notes): Proposal['plan'] {
+  const plan: Proposal['plan'] = {}
+  if (patch.overview) { plan.overview = patch.overview; notes.touches.push('Concept & theme') }
+  if (patch.recommendations) { plan.recommendations = patch.recommendations; notes.touches.push('Ideas') }
+  if (patch.risks) { plan.risks = patch.risks; notes.touches.push('Risks & backups') }
+  if (patch.assumptions) plan.assumptions = patch.assumptions
+  if (patch.followUpQuestions) plan.followUpQuestions = patch.followUpQuestions
+  return plan
+}
+
 /**
  * Turns an AI patch into a reviewable proposal. This is where every number and date is checked or
  * recomputed by application code. Nothing here changes the stored event.
  */
 export function buildProposal(o: BuildOptions): Proposal {
-  const { event, patch, flexibility, today } = o
-  const issues: string[] = []
-  const touches: string[] = []
+  const { event, patch, flexibility } = o
+  const notes: Notes = { issues: [], touches: [] }
 
   const resolved = resolveEventChanges(event, o.eventChanges)
-  issues.push(...resolved.issues)
+  notes.issues.push(...resolved.issues)
   const guests = resolved.guestCount ?? event.guestCount
   const budgetTotal = resolved.budget ?? event.budget
-  const eventChanges: Proposal['eventChanges'] = {}
-  if (resolved.guestCount !== undefined) {
-    eventChanges.guestCount = { from: event.guestCount, to: resolved.guestCount }
-    touches.push('Guest count')
-  }
-  if (resolved.budget !== undefined) {
-    eventChanges.budget = { from: event.budget, to: resolved.budget }
-    touches.push('Total budget')
-  }
+  const eventChanges = describeEventChanges(event, resolved, notes)
 
   let budget: BudgetProposal | undefined
-  if (patch.budget) {
-    const clean = sanitizeLines(patch.budget.lines, budgetTotal)
-    issues.push(...clean.issues)
-    const withReserve = ensureContingency(clean.lines, budgetTotal, flexibility)
-    const merged = mergeBudget(event.expenses, withReserve, budgetTotal)
-    issues.push(...merged.issues)
-    const analysisProposed = analyzeBudget([...merged.kept, ...merged.proposed], budgetTotal, guests)
-    const analysisFitted = merged.fitted ? analyzeBudget([...merged.kept, ...merged.fitted], budgetTotal, guests) : null
-    if (analysisProposed.overBudget)
-      issues.push(
-        merged.feasible
-          ? `The proposed budget is over by ${analysisProposed.overBy.toLocaleString('en-US')}. A trimmed version that fits is available.`
-          : `Even with maximum sensible trimming the plan is over budget by ${(analysisFitted?.overBy ?? analysisProposed.overBy).toLocaleString('en-US')}. Raise the budget, reduce guests or choose cheaper options.`,
-      )
-    // Savings the model claims can never exceed what is actually being spent.
-    const savings = patch.budget.savings.filter((s) => s.estimatedSaving <= analysisProposed.total).map((s) => ({ ...s, estimatedSaving: Math.round(s.estimatedSaving) }))
-    budget = {
-      ...merged,
-      analysisProposed,
-      analysisFitted,
-      savings,
-      upgrades: patch.budget.upgrades,
-      lines: withReserve.map((l) => ({ title: l.title, rationale: l.rationale, essential: l.essential })),
-      replaced: event.expenses.length - merged.kept.length,
-    }
-    touches.push('Budget')
-  } else if (resolved.guestCount !== undefined || resolved.budget !== undefined) {
-    // Rebalance existing lines for new headcount / budget with arithmetic only.
-    let expenses = event.expenses
-    if (resolved.guestCount !== undefined) {
-      const scaled = scaleForGuests(expenses, event.guestCount, resolved.guestCount)
-      expenses = scaled.expenses
-      for (const s of scaled.skipped) issues.push(`"${s.title}" is already billed or edited by you, so it was not rescaled. Confirm the new headcount with that vendor.`)
-    }
-    if (o.rebalanceBudget !== false) {
-      const re = rebalanceExpenses(expenses, budgetTotal)
-      expenses = re.expenses
-      if (!re.feasible) issues.push('Your costs cannot be trimmed enough to fit the new budget. Review the highest lines manually.')
-    }
-    const changed = expenses.filter((e, i) => e !== event.expenses[i])
-    if (changed.length > 0) {
-      const analysis = analyzeBudget(expenses, budgetTotal, guests)
-      if (analysis.overBudget) issues.push(`After the change you would be over budget by ${analysis.overBy.toLocaleString('en-US')}.`)
-      budget = {
-        kept: [], proposed: expenses, fitted: null, feasible: !analysis.overBudget, analysisProposed: analysis, analysisFitted: null,
-        savings: [], upgrades: [], lines: [], replaced: 0,
-      }
-      touches.push('Budget lines')
-    }
-  }
+  if (patch.budget) budget = budgetFromPatch(o, patch.budget, budgetTotal, guests, notes)
+  else if (resolved.guestCount !== undefined || resolved.budget !== undefined) budget = budgetFromChanges(o, resolved, budgetTotal, guests, notes)
 
-  let timeline: Proposal['timeline']
-  if (patch.timeline && patch.timeline.length > 0) {
-    const norm = normalizeTimeline(patch.timeline, event.date, today)
-    issues.push(...norm.issues)
-    if (norm.tasks.length > 0) {
-      const merged = mergeTimeline(event.tasks, norm.tasks)
-      issues.push(...merged.issues)
-      timeline = { tasks: merged.tasks, kept: merged.kept, replaced: merged.replaced, compressed: norm.compressed }
-      touches.push('Timeline')
-    }
-  }
-
-  let vendors: Proposal['vendors']
-  if (patch.vendors && patch.vendors.length > 0) {
-    const norm = normalizeVendors(patch.vendors, event.date, today)
-    issues.push(...norm.issues)
-    const merged = mergeVendors(event.vendors, norm.vendors)
-    issues.push(...merged.issues)
-    vendors = { vendors: merged.vendors, kept: merged.kept, replaced: merged.replaced }
-    touches.push('Vendor checklist')
-  }
-
-  const plan: Proposal['plan'] = {}
-  if (patch.overview) { plan.overview = patch.overview; touches.push('Concept & theme') }
-  if (patch.recommendations) { plan.recommendations = patch.recommendations; touches.push('Ideas') }
-  if (patch.risks) { plan.risks = patch.risks; touches.push('Risks & backups') }
-  if (patch.assumptions) plan.assumptions = patch.assumptions
-  if (patch.followUpQuestions) plan.followUpQuestions = patch.followUpQuestions
+  const timeline = timelineSection(o, notes)
+  const vendors = vendorSection(o, notes)
+  const plan = planSection(patch, notes)
 
   return {
     id: newId(),
@@ -198,8 +221,8 @@ export function buildProposal(o: BuildOptions): Proposal {
     timeline,
     vendors,
     plan,
-    issues: [...new Set(issues)],
-    touches: [...new Set(touches)],
+    issues: [...new Set(notes.issues)],
+    touches: [...new Set(notes.touches)],
     base: { expenses: event.expenses, tasks: event.tasks, vendors: event.vendors },
   }
 }
